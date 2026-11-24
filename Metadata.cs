@@ -12,7 +12,7 @@ namespace BoothConfig
     {
         public string Name;
         public List<string> Values = new List<string>(); // first is canonical, the rest are accepted aliases
-        public override string ToString() => Name;
+        public override string ToString() => Name == "." ? ". (off)" : Name; // debug.inf shows level 0 as a dot
     }
 
     class MenuDef
@@ -59,12 +59,14 @@ namespace BoothConfig
 
     class FieldDef
     {
+        public const int CallbacksOnly = 4; // the booth shows these but does not let them be edited
         public string Name, Label, Suffix = "", Default, MenuName, Help, FullHelp, OnExit;
         public int Width, Type;
         public Tx Flags;
         public bool Hidden;
         public MenuDef Menu;
         public bool IsConst => (Flags & Tx.Const) != 0;
+        public bool IsReadOnly => Type == CallbacksOnly;
     }
 
     /// <summary>A row on a form: either a field, or fixed text.</summary>
@@ -96,7 +98,7 @@ namespace BoothConfig
                 forms.AddRange(ini.Names.Where(s => ini.Pairs(s).Any(p => p.Key == "field")));
             foreach (var f in forms) ParseForm(f);
             if (Fields.Count == 0)
-                throw new FormatException("nsyscfg.ini does not define any configuration fields.");
+                throw new FormatException("no configuration fields are defined.");
         }
 
         public FieldDef Field(string name) => Fields.FirstOrDefault(f => f.Name == name);
@@ -116,7 +118,7 @@ namespace BoothConfig
             return menus[name] = m;
         }
 
-        class Elem { public int X, Y; public string Text; public FieldDef Field; }
+        class Elem { public int X, Y, Block; public string Text; public FieldDef Field; }
 
         void ParseForm(string section)
         {
@@ -154,8 +156,12 @@ namespace BoothConfig
                 }
             }
 
+            // a form laid out in columns goes back up for the next one; keep each column together
+            for (int i = 1; i < elems.Count; i++)
+                elems[i].Block = elems[i - 1].Block + (elems[i].Y < elems[i - 1].Y ? 1 : 0);
+
             GroupDef group = null;
-            foreach (var row in elems.GroupBy(e => e.Y).OrderBy(g => g.Key))
+            foreach (var row in elems.GroupBy(e => new { e.Block, e.Y }).OrderBy(g => g.Key.Block).ThenBy(g => g.Key.Y))
             {
                 var fields = row.Where(e => e.Field != null).OrderBy(e => e.X).ToList();
                 var texts = row.Where(e => e.Field == null).OrderBy(e => e.X).ToList();
@@ -174,7 +180,7 @@ namespace BoothConfig
                     Fields.Add(fe.Field);
                     if (!fe.Field.Hidden) rows.Add(new RowDef { Field = fe.Field, Label = fe.Field.Label });
                 }
-                if (row.Key >= HiddenRow) continue;
+                if (row.Key.Y >= HiddenRow) continue;
                 string heading = null;
                 if (fields.Count > 0 || texts.Count == 1)
                 {

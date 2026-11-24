@@ -1,7 +1,7 @@
 # Booth Config
 
 A Windows program for changing the configuration of Foto Fantasy based photo booths. It is a graphical
-alternative to the text-mode `nsyscfg` utility.
+alternative to the text-mode `nsyscfg` utility, and also edits the booth's debug levels.
 
 ## Use
 
@@ -22,19 +22,22 @@ started from one, it loads that booth right away.
 | `vsystem.cfg` | The saved values |
 | `vsystem.alt` | Kept identical to `vsystem.cfg` |
 | `zsystem.cfg` | Defaults for values that are not set |
+| `debug.inf` | The debug form, if present |
+| `debug.ini` | The saved debug levels |
 
 Choosing a currency set or vend type also updates the prices and the coin, bill and token values that
 depend on it. Choosing a printer updates the printer type.
 
-Saving lists the changes first, writes only the lines that changed, keeps the read-only attribute, and
-puts the previous file in `BoothConfig-backups`.
+Saving lists the changes first, writes only the files and lines that changed, keeps the read-only
+attribute, and puts the previous files in `BoothConfig-backups`.
 
 ## Limits
 
 - Scripts that `nsyscfg.ini` attaches to a field (such as `fix-vsyscfg.sh` for the control panel style)
   are not run.
 - Changes to the daily service hours are not logged in `norms.log`.
-- Only tested with copies of one booth's data so far.
+- So far only used with one booth's data. The `vsystem.cfg` settings have been used with a running booth;
+  the debug settings have been tested on copies of the files.
 
 ## Build
 

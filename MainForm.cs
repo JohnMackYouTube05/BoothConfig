@@ -146,11 +146,13 @@ namespace BoothConfig
             booth = next;
             BuildPages();
             UpdateState();
-            if (booth.LoadedFrom == null)
-                Status("No saved configuration here yet. Showing defaults; saving will create " + Booth.CfgName + ".");
-            else if (booth.LoadedFrom != Booth.CfgName)
-                Status(Booth.CfgName + " is missing. Loaded " + booth.LoadedFrom + " instead; saving will create " + Booth.CfgName + ".");
-            else Status("Loaded " + Booth.CfgName + ".");
+            var from = booth.System.LoadedFrom;
+            string status;
+            if (from == null) status = "No saved configuration here yet. Showing defaults; saving will create " + Booth.CfgName + ".";
+            else if (from != Booth.CfgName) status = Booth.CfgName + " is missing. Loaded " + from + " instead; saving will create " + Booth.CfgName + ".";
+            else status = "Loaded " + string.Join(" and ", booth.Docs.Where(d => d.LoadedFrom != null).Select(d => d.LoadedFrom)) + ".";
+            if (booth.DebugError != null) status += " The debug settings could not be read: " + booth.DebugError;
+            Status(status);
         }
 
         void Revert()
@@ -172,15 +174,19 @@ namespace BoothConfig
             SuspendLayout();
             ClearBody();
             var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(S(10), S(5)), Name = "tabs" };
-            foreach (var page in booth.Meta.Pages) tabs.TabPages.Add(MakePage(page.Title, page.Groups, null));
+            foreach (var doc in booth.Docs)
+                foreach (var page in doc.Meta.Pages) tabs.TabPages.Add(MakePage(doc, page.Title, page.Groups, null));
 
-            var hidden = booth.Meta.Fields.Where(f => f.Hidden).ToList();
-            if (hidden.Count > 0)
+            foreach (var doc in booth.Docs)
             {
-                var g = new GroupDef { Heading = "Hidden fields" };
+                var hidden = doc.Meta.Fields.Where(f => f.Hidden).ToList();
+                if (hidden.Count == 0) continue;
+                var g = new GroupDef { Heading = "Hidden fields" + (doc == booth.System ? "" : " of " + doc.FileName) };
                 g.Rows.AddRange(hidden.Select(f => new RowDef { Field = f, Label = f.Label }));
-                tabs.TabPages.Add(MakePage("Hidden Fields", new List<GroupDef> { g },
-                    "The booth's own tool stores these but never shows them. Prices and currency follow the Money settings."));
+                var note = "The booth's own tool stores these but never shows them.";
+                if (doc == booth.System) note += " Prices and currency follow the Money settings.";
+                tabs.TabPages.Add(MakePage(doc, doc == booth.System ? "Hidden Fields" : "Hidden (" + doc.FileName + ")",
+                    new List<GroupDef> { g }, note));
             }
             tabs.TabPages.Add(MakeOtherPage());
             body.Controls.Add(tabs);
@@ -191,7 +197,7 @@ namespace BoothConfig
             if (scroll > 0 && tabs.SelectedTab.Controls[0] is Panel np) np.AutoScrollPosition = new Point(0, scroll);
         }
 
-        TabPage MakePage(string title, List<GroupDef> groups, string note)
+        TabPage MakePage(ConfigDoc doc, string title, List<GroupDef> groups, string note)
         {
             var page = new TabPage(title) { BackColor = SystemColors.Window };
             var scroller = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(S(12), S(4), S(12), S(12)) };
@@ -215,25 +221,25 @@ namespace BoothConfig
                 {
                     AddWide(table, new Label { Text = note, AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(S(3), 0, 0, S(4)) });
                     var unlock = new CheckBox { Text = "Allow editing", AutoSize = true, Name = "unlockHidden" };
-                    unlock.CheckedChanged += (s, e) => { foreach (var ed in own) ed.Control.Enabled = unlock.Checked; };
+                    unlock.CheckedChanged += (s, e) => { foreach (var ed in own) ed.Control.Enabled = unlock.Checked && !ed.Field.IsReadOnly; };
                     AddWide(table, unlock);
                 }
                 foreach (var r in g.Rows)
                 {
                     if (r.Field == null) { AddRow(table, MakeCaption(r.Label), new Label { Text = r.Text, AutoSize = true, Margin = new Padding(S(3), S(6), 0, S(6)) }, null); continue; }
-                    var ed = Editor.Create(booth, r.Field);
+                    var ed = Editor.Create(doc, r.Field);
                     ed.Caption = MakeCaption(r.Field.Suffix.Length > 0 ? r.Label + " (" + r.Field.Suffix + ")" : r.Label);
                     ed.HelpLabel = MakeHelp(r.Field);
                     ed.Control.Dock = DockStyle.Top;
                     ed.Control.Margin = new Padding(S(3), S(3), S(18), S(3));
-                    ed.Control.Enabled = !r.Field.IsConst && r.Field.Type != 4;
+                    ed.Control.Enabled = !r.Field.IsConst && !r.Field.IsReadOnly;
                     ed.Changed += RefreshEditors;
                     ed.Control.Enter += (s, e) => Status(r.Field.Help + (r.Field.FullHelp != null ? "   F1 = more help" : ""));
                     AddRow(table, ed.Caption, ed.Control, ed.HelpLabel);
                     editors.Add(ed);
                     own.Add(ed);
                 }
-                if (moneyLabel == null && g.Rows.Any(r => r.Field != null && r.Field.Name == "country"))
+                if (moneyLabel == null && doc == booth.System && g.Rows.Any(r => r.Field != null && r.Field.Name == "country"))
                 {
                     moneyLabel = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(S(3), S(4), 0, S(4)), Name = "money" };
                     AddRow(table, null, moneyLabel, null);
@@ -277,7 +283,7 @@ namespace BoothConfig
             t.SetColumnSpan(c, 3);
         }
 
-        /// <summary>Everything in vsystem.cfg that nsyscfg.ini does not describe.</summary>
+        /// <summary>Everything in the configuration files that their metadata does not describe.</summary>
         TabPage MakeOtherPage()
         {
             var page = new TabPage("Other Settings") { BackColor = SystemColors.Window };
@@ -289,7 +295,7 @@ namespace BoothConfig
             var unlock = new CheckBox { Text = "Allow editing", AutoSize = true, Name = "unlockOther", Margin = new Padding(S(16), S(4), 0, 0) };
             var note = new Label
             {
-                Text = "Values in " + Booth.CfgName + " that " + Booth.MetaName + " does not describe. Most are set by the booth software or its product setup.",
+                Text = "Values that " + string.Join(" or ", booth.Docs.Select(d => d.MetaName)) + " does not describe. Most are set by the booth software or its product setup.",
                 AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(S(3), 0, 0, S(6))
             };
             top.Controls.Add(note, 0, 0);
@@ -309,11 +315,19 @@ namespace BoothConfig
             grid.RowTemplate.Height = S(24);
             grid.Columns.Add("key", "Setting");
             grid.Columns.Add("value", "Value");
-            grid.Columns[0].FillWeight = 35;
-            grid.Columns[1].FillWeight = 65;
-            foreach (var key in booth.Keys().Where(k => booth.Meta.Field(k) == null)) grid.Rows.Add(key, booth.Get(key));
+            grid.Columns.Add("file", "File");
+            grid.Columns[0].FillWeight = 32;
+            grid.Columns[1].FillWeight = 53;
+            grid.Columns[2].FillWeight = 15;
+            foreach (var doc in booth.Docs)
+                foreach (var key in doc.Keys().Where(k => doc.Meta.Field(k) == null))
+                    grid.Rows[grid.Rows.Add(key, doc.Get(key), doc.FileName)].Tag = doc;
 
-            unlock.CheckedChanged += (s, e) => { grid.ReadOnly = !unlock.Checked; grid.Columns[0].ReadOnly = true; };
+            unlock.CheckedChanged += (s, e) =>
+            {
+                grid.ReadOnly = !unlock.Checked;
+                grid.Columns[0].ReadOnly = grid.Columns[2].ReadOnly = true;
+            };
             filter.TextChanged += (s, e) =>
             {
                 grid.EndEdit();
@@ -326,7 +340,7 @@ namespace BoothConfig
             grid.CellValueChanged += (s, e) =>
             {
                 if (loading || e.RowIndex < 0 || e.ColumnIndex != 1) return;
-                booth.Set((string)grid[0, e.RowIndex].Value, ((string)grid[1, e.RowIndex].Value ?? "").Trim());
+                ((ConfigDoc)grid.Rows[e.RowIndex].Tag).Set((string)grid[0, e.RowIndex].Value, ((string)grid[1, e.RowIndex].Value ?? "").Trim());
                 RefreshEditors();
             };
             refreshGrid = () =>
@@ -335,12 +349,13 @@ namespace BoothConfig
                 foreach (DataGridViewRow r in grid.Rows)
                 {
                     var key = (string)r.Cells[0].Value;
-                    var v = booth.Get(key) ?? "";
+                    var doc = (ConfigDoc)r.Tag;
+                    var v = doc.Get(key) ?? "";
                     if ((string)r.Cells[1].Value != v) r.Cells[1].Value = v;
-                    bool edited = booth.IsEdited(key);
+                    bool edited = doc.IsEdited(key);
                     r.DefaultCellStyle.Font = edited ? bold : null;
                     r.DefaultCellStyle.ForeColor = edited ? Accent : Color.Empty;
-                    r.Cells[1].ErrorText = edited ? Booth.Problem(v, null) ?? "" : "";
+                    r.Cells[1].ErrorText = edited ? ConfigDoc.Problem(v, null) ?? "" : "";
                 }
                 loading = false;
             };
@@ -353,7 +368,7 @@ namespace BoothConfig
         {
             foreach (var ed in editors)
             {
-                ed.RefreshFromBooth();
+                ed.RefreshFromDoc();
                 ed.Caption.Font = ed.IsEdited ? bold : Font;
                 ed.Caption.ForeColor = ed.IsEdited ? Accent : SystemColors.ControlText;
                 errors.SetError(ed.Control, ed.Problem ?? "");
@@ -365,60 +380,73 @@ namespace BoothConfig
 
         string MoneyText()
         {
-            var country = booth.Get("country");
-            var cs = booth.Currency();
+            var country = booth.System.Get("country");
+            var cs = booth.System.Currency();
             if (!cs.Defined)
                 return string.IsNullOrEmpty(country) ? "No currency set is selected."
-                    : Booth.LocaleName + " has no data for “" + country + "”, so prices and coin values are left as they are.";
+                    : SystemDoc.LocaleName + " has no data for “" + country + "”, so prices and coin values are left as they are.";
             var text = "Price to start: " + Amount("play_cost");
             string[] names = { "foto1_cost", "first print adds", "foto2_cost", "second print", "foto3_cost", "third print",
                 "foto1_alt_cost", "premium first", "foto2_alt_cost", "premium second", "foto3_alt_cost", "premium third" };
             for (int i = 0; i < names.Length; i += 2)
-                if (int.TryParse(booth.Get(names[i]), out var n) && n >= 0) text += ", " + names[i + 1] + " " + Amount(names[i]);
+                if (int.TryParse(booth.System.Get(names[i]), out var n) && n >= 0) text += ", " + names[i + 1] + " " + Amount(names[i]);
             text += "\nCoins: " + Values("coinvals") + "     Bills: " + Values("billvals") + "     Tokens: " + Values("tokenvals");
-            return text + "\nThese amounts come from " + Booth.LocaleName + " and are saved with the vend type.";
+            return text + "\nThese amounts come from " + SystemDoc.LocaleName + " and are saved with the vend type.";
         }
 
-        string Amount(string key) => booth.Get(key) ?? "not set";
+        string Amount(string key) => booth.System.Get(key) ?? "not set";
 
         string Values(string key)
         {
-            var vals = (booth.Get(key) ?? "").Split(',').Where(v => v.Trim().Length > 0 && v.Trim() != "-1").ToArray();
+            var vals = (booth.System.Get(key) ?? "").Split(',').Where(v => v.Trim().Length > 0 && v.Trim() != "-1").ToArray();
             return vals.Length == 0 ? "none" : string.Join(", ", vals);
         }
 
         // ---- saving ----
 
-        bool CanSave => booth != null && (booth.Dirty || booth.LoadedFrom != Booth.CfgName);
+        bool CanSave => booth != null && booth.NeedsSave;
 
         bool SaveChanges()
         {
             if (!CanSave) return true;
             Validate(); // commit a grid cell that is still being edited
-            var bad = booth.Changes().Select(c => new { c.Key, Why = Booth.Problem(c.New, booth.Meta.Field(c.Key)) })
+            var bad = booth.Changes().Select(c => new { Change = c, Why = ConfigDoc.Problem(c.New, c.Doc.Meta.Field(c.Key)) })
                 .Where(x => x.Why != null).ToList();
             if (bad.Count > 0)
             {
                 MessageBox.Show(this, "Please correct these values first:\n\n" +
-                    string.Join("\n", bad.Select(b => LabelOf(b.Key) + ": " + b.Why)), Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    string.Join("\n", bad.Select(b => LabelOf(b.Change) + ": " + b.Why)), Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
             if (!ConfirmChanges()) return false;
-            if (booth.ChangedOnDisk() && MessageBox.Show(this,
-                    Booth.CfgName + " was changed by another program since it was loaded (is the booth running?).\n\n" +
-                    "Apply your changes to the newer file? Its other values will be kept.",
+            var moved = booth.Docs.Where(d => d.NeedsSave && d.ChangedOnDisk()).ToList();
+            if (moved.Count > 0 && MessageBox.Show(this,
+                    string.Join(" and ", moved.Select(d => d.FileName)) + " was changed by another program since it was loaded (is the booth running?).\n\n" +
+                    "Apply your changes to the newer version? Its other values will be kept.",
                     Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return false;
-            try { booth.Save(); }
-            catch (Exception ex) { Fail("The configuration could not be saved. Your changes are still here.", ex); return false; }
+            var saved = new List<string>();
+            foreach (var doc in booth.Docs.Where(d => d.NeedsSave).ToList())
+            {
+                try { doc.Save(); }
+                catch (Exception ex)
+                {
+                    RefreshEditors();
+                    Fail(doc.FileName + " could not be saved. Your changes to it are still here." +
+                         (saved.Count > 0 ? "\n" + string.Join(", ", saved) + " was saved." : ""), ex);
+                    return false;
+                }
+                saved.Add(doc.FileName);
+            }
             LoadBooth(booth.Folder);
-            Status("Saved. The previous file is in " + Booth.BackupDir + ". Restart the booth program if it is running.");
+            Status("Saved " + string.Join(" and ", saved) + ". Previous versions are in " + ConfigDoc.BackupDir +
+                   ". Restart the booth program if it is running.");
             return true;
         }
 
-        string LabelOf(string key)
+        static string LabelOf(Change c)
         {
-            var f = booth.Meta.Field(key);
-            return f == null || f.Label == key ? key : f.Label + " (" + key + ")";
+            var f = c.Doc.Meta.Field(c.Key);
+            return f == null || f.Label == c.Key ? c.Key : f.Label + " (" + c.Key + ")";
         }
 
         bool ConfirmChanges()
@@ -426,20 +454,21 @@ namespace BoothConfig
             using (var dlg = new Form
             {
                 Text = "Save changes", Font = Font, StartPosition = FormStartPosition.CenterParent, ShowInTaskbar = false,
-                MinimizeBox = false, MaximizeBox = false, ClientSize = new Size(S(680), S(380)), AutoScaleMode = AutoScaleMode.None
+                MinimizeBox = false, MaximizeBox = false, ClientSize = new Size(S(760), S(380)), AutoScaleMode = AutoScaleMode.None
             })
             {
                 var list = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, Name = "changes", ShowItemToolTips = true };
                 list.Columns.Add("Setting", S(280));
                 list.Columns.Add("From", S(185));
                 list.Columns.Add("To", S(185));
+                list.Columns.Add("File", S(85));
                 foreach (var c in booth.Changes())
-                    list.Items.Add(new ListViewItem(new[] { LabelOf(c.Key), c.Old ?? "(not set)", string.IsNullOrEmpty(c.New) ? "(blank)" : c.New }));
+                    list.Items.Add(new ListViewItem(new[] { LabelOf(c), c.Old ?? "(not set)", string.IsNullOrEmpty(c.New) ? "(blank)" : c.New, c.Doc.FileName }));
                 var head = new Label
                 {
                     Dock = DockStyle.Top, Height = S(34), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(S(8), 0, 0, 0),
-                    Text = booth.Dirty ? "These values will be written to " + Booth.CfgName + " and " + Booth.AltName + ":"
-                        : Booth.CfgName + " will be created."
+                    Text = !booth.Dirty ? Booth.CfgName + " will be created."
+                        : "These values will be written:" + (booth.System.NeedsSave ? "   (" + SystemDoc.AltName + " is kept identical to " + Booth.CfgName + ")" : "")
                 };
                 var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(S(6)) };
                 var cancel = MakeButton("Cancel", "cancelSave", null);
@@ -498,7 +527,7 @@ namespace BoothConfig
                     if (ed == null) break;
                     var f = ed.Field;
                     var help = f.FullHelp ?? (f.Help.Length > 0 ? f.Help : "No help is available for this field.");
-                    MessageBox.Show(this, help + "\n\nStored as: " + f.Name, f.Label, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(this, help + "\n\nStored as: " + f.Name + " in " + ed.Doc.FileName, f.Label, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);

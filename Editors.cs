@@ -29,22 +29,23 @@ namespace BoothConfig
         public Control Control;
         public Label Caption, HelpLabel;
         public event Action Changed;
-        protected Booth Booth;
+        public ConfigDoc Doc;
         protected bool Loading;
 
         protected void RaiseChanged() => Changed?.Invoke();
 
-        public static Editor Create(Booth booth, FieldDef f)
+        public static Editor Create(ConfigDoc doc, FieldDef f)
         {
             Editor e;
             bool menu = f.Menu != null && f.Menu.Items.Count > 0;
-            if (f.Name == "vendType" && booth.Meta.Field("current_price") != null && booth.Locale.Countries.Count > 0)
+            if (f.IsReadOnly) e = new ReadOnlyEditor();
+            else if (f.Name == "vendType" && doc is SystemDoc sys && doc.Meta.Field("current_price") != null && sys.Locale.Countries.Count > 0)
                 e = new PriceEditor();
             else if (menu && (f.Flags & Tx.Checklist) != 0) e = new ChecklistEditor();
             else if (menu && (f.Type == 0 || f.Type == 1)) e = new ChoiceEditor();
             else if (menu && f.Type == 3) e = new SuggestEditor();
             else e = new TextEditor();
-            e.Booth = booth;
+            e.Doc = doc;
             e.Field = f;
             e.Build();
             e.Control.Name = f.Name;
@@ -55,18 +56,18 @@ namespace BoothConfig
         protected abstract void Build();
         protected abstract void Show();
 
-        public void RefreshFromBooth()
+        public void RefreshFromDoc()
         {
             Loading = true;
             try { Show(); } finally { Loading = false; }
         }
 
-        public virtual bool IsEdited => Booth.IsEdited(Field.Name);
-        public virtual string Problem => Booth.IsEdited(Field.Name) ? Booth.Problem(Booth.Get(Field.Name), Field) : null;
+        public virtual bool IsEdited => Doc.IsEdited(Field.Name);
+        public virtual string Problem => Doc.IsEdited(Field.Name) ? ConfigDoc.Problem(Doc.Get(Field.Name), Field) : null;
 
         protected string DefaultText()
         {
-            var d = Booth.DefaultOf(Field);
+            var d = Doc.DefaultOf(Field);
             if (d.Length == 0) return "(not set)";
             return "(not set, default: " + (Field.Menu?.Find(d)?.Name ?? d) + ")";
         }
@@ -81,7 +82,7 @@ namespace BoothConfig
             box.TextChanged += (s, e) =>
             {
                 if (Loading) return;
-                Booth.Set(Field.Name, box.Text.Trim());
+                Doc.Set(Field.Name, box.Text.Trim());
                 RaiseChanged();
             };
         }
@@ -89,9 +90,21 @@ namespace BoothConfig
         protected override void Show()
         {
             var box = (TextBox)Control;
-            var v = Booth.Get(Field.Name) ?? "";
+            var v = Doc.Get(Field.Name) ?? "";
             if (!Field.Hidden && Field.Width > 0) box.MaxLength = Math.Max(Field.Width, v.Length);
             if (box.Text.Trim() != v.Trim() || !box.Focused) box.Text = v;
+        }
+    }
+
+    /// <summary>A value that the booth shows but does not let anyone edit.</summary>
+    class ReadOnlyEditor : Editor
+    {
+        protected override void Build() => Control = new TextBox { ReadOnly = true };
+
+        protected override void Show()
+        {
+            var v = Doc.Get(Field.Name) ?? "";
+            Control.Text = Field.Menu?.Find(v)?.ToString() ?? v;
         }
     }
 
@@ -114,17 +127,17 @@ namespace BoothConfig
 
         protected virtual void Choose(object item)
         {
-            var saved = Booth.Saved(Field.Name);
-            if (item is Other o) Booth.Set(Field.Name, o.Value);
+            var saved = Doc.Saved(Field.Name);
+            if (item is Other o) Doc.Set(Field.Name, o.Value);
             // picking what is already saved puts the saved spelling back, so it does not count as a change
             else if (item is MenuItemDef m)
-                Booth.Set(Field.Name, saved != null && Field.Menu.Find(saved) == m ? saved : Field.Menu.ValueFor(m, saved));
+                Doc.Set(Field.Name, saved != null && Field.Menu.Find(saved) == m ? saved : Field.Menu.ValueFor(m, saved));
         }
 
         protected override void Show()
         {
-            var saved = Booth.Saved(Field.Name);
-            var value = Booth.Get(Field.Name);
+            var saved = Doc.Saved(Field.Name);
+            var value = Doc.Get(Field.Name);
             var items = Field.Menu.Items.Cast<object>().ToList();
             object sel = value == null ? null : Field.Menu.Find(value);
             if (saved == null)
@@ -161,17 +174,19 @@ namespace BoothConfig
     /// <summary>Vend type. The choices are the price list of the selected currency set, identified by name.</summary>
     class PriceEditor : ChoiceEditor
     {
-        public override bool IsEdited => Booth.IsEdited("current_price") || base.IsEdited;
+        SystemDoc System => (SystemDoc)Doc;
+
+        public override bool IsEdited => Doc.IsEdited("current_price") || base.IsEdited;
 
         protected override void Choose(object item)
         {
-            if (item is Price) Booth.SetPrice(Booth.Currency().Prices[Combo.Items.Cast<object>().OfType<Price>().ToList().IndexOf((Price)item)]);
+            if (item is Price) System.SetPrice(System.Currency().Prices[Combo.Items.Cast<object>().OfType<Price>().ToList().IndexOf((Price)item)]);
             else base.Choose(item);
         }
 
         protected override void Show()
         {
-            var prices = Booth.Currency().Prices;
+            var prices = System.Currency().Prices;
             if (prices.Count == 0)
             {
                 // no price list for this country: fall back on the built-in vend types of nsyscfg.ini
@@ -179,8 +194,8 @@ namespace BoothConfig
                 return;
             }
             var items = prices.Cast<object>().ToList();
-            var name = Booth.Get("current_price") ?? "";
-            var cur = Booth.CurrentPrice();
+            var name = Doc.Get("current_price") ?? "";
+            var cur = System.CurrentPrice();
             object sel = cur == null ? null : prices.First(p => p.Name == cur.Name && p.Costs.SequenceEqual(cur.Costs));
             if (sel == null) items.Insert(0, sel = name.Length == 0 ? "(not set)" : name + "  (not in price list)");
             Fill(items, sel);
@@ -198,14 +213,14 @@ namespace BoothConfig
             {
                 if (Loading) return;
                 var m = Field.Menu.Items.FirstOrDefault(i => i.Name == combo.Text);
-                Booth.Set(Field.Name, m != null ? Field.Menu.ValueFor(m, Booth.Saved(Field.Name)) : combo.Text);
+                Doc.Set(Field.Name, m != null ? Field.Menu.ValueFor(m, Doc.Saved(Field.Name)) : combo.Text);
                 RaiseChanged();
             };
         }
 
         protected override void Show()
         {
-            var v = Booth.Get(Field.Name) ?? "";
+            var v = Doc.Get(Field.Name) ?? "";
             var text = Field.Menu.Find(v)?.Name ?? v;
             if (Control.Text != text && !Control.Focused) Control.Text = text;
         }
@@ -226,7 +241,7 @@ namespace BoothConfig
                 for (int i = 0; i < list.Items.Count; i++)
                     if (i == e.Index ? e.NewValue == CheckState.Checked : list.GetItemChecked(i))
                         on.Add(((MenuItemDef)list.Items[i]).Values[0]);
-                Booth.Set(Field.Name, string.Join(",", on));
+                Doc.Set(Field.Name, string.Join(",", on));
                 list.BeginInvoke((Action)RaiseChanged);
             };
         }
@@ -234,7 +249,7 @@ namespace BoothConfig
         protected override void Show()
         {
             var list = (CheckedListBox)Control;
-            var on = (Booth.Get(Field.Name) ?? "").Split(',').Select(v => Field.Menu.Find(v.Trim())).ToList();
+            var on = (Doc.Get(Field.Name) ?? "").Split(',').Select(v => Field.Menu.Find(v.Trim())).ToList();
             for (int i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, on.Contains((MenuItemDef)list.Items[i]));
         }
     }
